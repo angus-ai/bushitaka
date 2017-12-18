@@ -17,41 +17,60 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from multiprocessing import Process, Pipe
-from threading import Thread
-
 '''
 A framework for implement a service oriented architecture.
 '''
 
+from multiprocessing import Process, Pipe, Lock
+from threading import Thread
+
 def rpc(func):
+    ''' A decorator to expose method through rpc
+    '''
     def func_wrapper(self, *args, **kwargs):
-        self._rpc_parent.send((func.__name__, args, kwargs))
-        result = self._rpc_parent.recv()
+        ''' Call proxy if it is the parent or the method
+        if it is the child
+        '''
+        # pylint: disable=protected-access
+        if self._child:
+            return func(self, *args, **kwargs)
+
+        # pylint: disable=protected-access
+        with self._rpc_lock:
+            self._rpc_parent.send((func.__name__, args, kwargs))
+            result = self._rpc_parent.recv()
         return result
 
-    func_wrapper._rpc = func
+    # pylint: disable=protected-access
+    func_wrapper._rpc = True
     return func_wrapper
 
 class Service(Process):
-    ''' A service is a standalone process with a link on a broker,
-    and present an rpc interface for its parent'''
-
+    ''' A service is a standalone process
+    it offers a an rpc interface for its parent'''
 
     def __init__(self):
         super(Service, self).__init__()
         parent, child = Pipe(duplex=True)
         self._rpc_parent = parent
         self._rpc_child = child
+        self._rpc_thread = None
+        self._rpc_lock = Lock()
+        self._child = False
 
     def _call_rpc(self, methods):
+        ''' Thread function to execute remote call
+        '''
         while True:
             func_name, args, kwargs = self._rpc_child.recv()
             if func_name in methods:
-                result = methods[func_name]._rpc(self, *args, **kwargs)
+                # pylint: disable=protected-access
+                result = methods[func_name](*args, **kwargs)
                 self._rpc_child.send(result)
 
     def _install_rpc(self):
+        ''' Find methods to expose through rpc.
+        '''
         methods = {
             method_name: getattr(self, method_name)
             for method_name in dir(self)
@@ -66,13 +85,20 @@ class Service(Process):
         self._rpc_thread.start()
 
     def _initialize(self):
+        ''' Method before main function
+        '''
+        self._child = True
         self._install_rpc()
 
     def _finalize(self):
+        ''' Method after main function
+        '''
         pass
 
     def main(self):
-        pass
+        ''' The body of the service
+        '''
+        raise NotImplementedError("You must override main method")
 
     def run(self):
         self._initialize()
